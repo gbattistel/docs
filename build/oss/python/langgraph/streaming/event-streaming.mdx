@@ -1,0 +1,350 @@
+---
+title: Event Streaming
+description: Stream LangGraph runs with typed projections for messages, state, subgraphs, output, and extensions.
+---
+
+Event Streaming is the recommended in-process streaming model for most LangGraph application code. It returns a run stream object that can be consumed in multiple ways at the same time.
+
+```py
+run = graph.stream_events({
+    "messages": [{"role": "user", "content": "What is 42 * 17?"}],
+}, version="v3")
+
+for message in run.messages:
+    for token in message.text:
+        print(token, end="", flush=True)
+
+final_state = run.output
+```
+
+
+
+
+<Note>
+  The `version="v3"` flag is temporarily required to opt in to this stream behavior. The new behavior will become the default stream version in the next major LangGraph release.
+</Note>
+
+## Choose in-process or remote streaming
+
+LangGraph uses the same streaming event model in process and over the wire. The API surface changes because local code can hold rich objects directly, while remote clients receive serialized protocol events.
+
+Use in-process streaming when your code runs in the same process as the graph:
+
+```py
+run = graph.stream_events({
+    "messages": [{"role": "user", "content": "What is 42 * 17?"}],
+}, version="v3")
+
+for message in run.messages:
+    for token in message.text:
+        print(token, end="", flush=True)
+
+output = run.output
+```
+
+
+
+
+In-process streams can expose rich Python objects such as iterators, properties, and class instances. Native projections such as `run.messages` and `run.subgraphs` are built with stream transformers over the graph's event flow.
+
+
+
+
+Use remote streaming when the graph or agent runs behind a LangGraph API server:
+
+```py
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2024")
+thread = await client.threads.create()
+
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    "my-agent",
+    input={"messages": [{"role": "user", "content": "hello"}]},
+    stream_mode="messages-tuple",
+):
+    if chunk.event == "messages":
+        message_chunk, metadata = chunk.data
+        print(message_chunk.content, end="", flush=True)
+```
+
+
+
+
+The Python SDK currently exposes remote streaming through `client.runs.stream(...)` and related run APIs.
+
+
+
+
+In-process and remote streaming share these properties:
+
+- Both surfaces are organized around messages, state values, subgraphs, output, and custom extensions.
+- Both support multiple independent consumers over the same run.
+- Both use namespaces to describe where an event came from in a graph tree.
+- Both can expose custom transformer data when the data is serializable.
+
+| Concern | In process | Remote |
+| ------- | ---------- | ------ |
+| Entry point | `graph.stream_events(..., version="v3")` | `client.threads.stream(...)` or `client.runs.stream(...)` |
+| Transport | Direct async iterables | SSE, WebSocket, or custom adapter |
+| Projection source | Runtime objects | Serialized protocol events |
+| Custom streaming data | Local projections | Named `StreamChannel` events via `custom:<name>` |
+| Reconnect and replay | Not needed | Handled by sequence numbers and SDK buffers |
+
+## What Event Streaming provides
+
+The run stream exposes typed projections over one underlying event flow:
+
+| Projection | Use |
+| ---------- | --- |
+| `run` | Iterate every protocol event. |
+| `run.messages` | Stream chat model messages and token deltas. |
+| `run.values` | Iterate state snapshots and await the final value. |
+| `run.output` | Await the final output. |
+| `run.subgraphs` | Discover and observe nested graph executions. |
+| `run.interrupts` | Inspect human-in-the-loop interrupt payloads. |
+| `run.interrupted` | Check whether the run paused for human input. |
+| `run.extensions` | Consume custom stream transformer projections. |
+
+Multiple consumers can read these projections concurrently. Reading `run.messages` does not consume events needed by `run.values`, `run.subgraphs`, or `run.output`.
+
+## Stream all protocol events
+
+Use the run object itself when you want the raw protocol event stream:
+
+```py
+run = graph.stream_events({
+    "messages": [{"role": "user", "content": "What is 42 * 17?"}],
+}, version="v3")
+
+for event in run:
+    namespace = event["params"]["namespace"]
+    print(namespace, event["method"], event["params"]["data"])
+```
+
+
+
+
+Each event has a channel-like `method`, a `seq` number, and `params` containing `namespace`, `timestamp`, optional `node`, and channel-specific `data`. To subscribe to specific graph, subgraph, or task namespaces, see [Namespaces](/oss/python/langgraph/streaming/namespaces).
+
+For `method == "messages"`, `event["params"]["data"]` contains content-block lifecycle events such as `message-start`, `content-block-delta`, and `message-finish`.
+
+```py
+for event in run:
+    if event["method"] != "messages":
+        continue
+
+    data = event["params"]["data"]
+    if data.get("event") != "content-block-delta":
+        continue
+
+    block = data.get("content_block") or {}
+    if block.get("type") == "text":
+        print(block.get("text", ""), end="", flush=True)
+    elif block.get("type") == "reasoning":
+        print(f"[thinking]{block.get('reasoning', '')}", end="", flush=True)
+```
+
+
+## Stream messages
+
+Use `run.messages` for chat model output:
+
+```py
+run = graph.stream_events(input, version="v3")
+
+for message in run.messages:
+    text = str(message.text)
+    usage = message.output.usage_metadata
+
+    print(text)
+    print(usage)
+```
+
+
+
+
+`message.text` is iterable in synchronous code. Iterate it for token-by-token output, or call `str(message.text)` for the complete text.
+
+`message.reasoning` exposes reasoning deltas, and `message.tool_calls` exposes tool-call argument chunks. If you need text, reasoning, and tool-call chunks in exact arrival order, iterate the message stream's raw events instead of each projection separately.
+
+
+
+
+## Stream subgraphs
+
+Use `run.subgraphs` to observe nested graph work without parsing namespace strings:
+
+```py
+run = graph.stream_events(input, version="v3")
+
+for subgraph in run.subgraphs:
+    print(subgraph.name, subgraph.path)
+
+    for message in subgraph.messages:
+        print(str(message.text))
+```
+
+
+
+
+For product-specific streams, see [Deep Agents streaming](/oss/python/deepagents/event-streaming) for subagent streams and [LangChain agent streaming](/oss/python/langchain/streaming) for tool calls and middleware events.
+
+## Stream state
+
+Use `run.values` to stream full state snapshots after each step:
+
+```py
+run = graph.stream_events(input, version="v3")
+
+for snapshot in run.values:
+    print(snapshot)
+
+final_state = run.output
+```
+
+
+
+
+## Stream multiple projections
+
+Use `run.interleave(...)` to round-robin across multiple projections in synchronous Python code:
+
+```py
+for name, item in run.interleave("values", "messages", "subgraphs"):
+    if name == "values":
+        print(f"[state] keys={list(item)}")
+    elif name == "messages":
+        print(f"[llm] node={item.node}")
+    elif name == "subgraphs":
+        print(f"[subgraph] path={item.path}")
+```
+
+
+
+
+## Add custom projections
+
+Custom stream transformers can add application-specific projections under `run.extensions`:
+
+```py
+run = graph.stream_events(
+    input,
+    version="v3",
+    transformers=[stats_transformer, tool_activity_transformer],
+)
+
+for activity in run.extensions["tool_activity"]:
+    print(activity)
+
+for total_tokens in run.extensions["total_tokens"]:
+    print(total_tokens)
+```
+
+
+
+
+See [custom stream transformers](/oss/python/langgraph/streaming/custom-transformers) for the transformer contract.
+
+## Stream deployed graphs and agents
+
+Use the LangGraph SDK to stream graphs and agents that run behind a LangGraph API server.
+
+Python remote streaming currently uses run stream chunks. Use `client.runs.stream(...)` with `stream_mode` values such as `updates`, `values`, `messages-tuple`, and `custom`.
+
+```py
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    "my-agent",
+    input={"messages": [{"role": "user", "content": "hello"}]},
+    metadata={"source": "docs"},
+    stream_mode="updates",
+):
+    print(chunk.data)
+```
+
+
+
+
+### Subscribe to raw protocol events
+
+Most applications should use Event Streaming through typed projections. Use raw subscriptions for debugging, advanced routing, or custom rendering:
+
+```py
+async for chunk in client.runs.stream(
+    thread["thread_id"],
+    "my-agent",
+    input={"messages": [{"role": "user", "content": "hello"}]},
+    stream_mode=["updates", "messages-tuple", "custom"],
+):
+    print(chunk.event, chunk.data)
+```
+
+
+
+
+Use `namespaces` and `depth` to subscribe to specific graph, subgraph, and task events. See [Namespaces](/oss/python/langgraph/streaming/namespaces) for matching rules and recipes.
+
+### Reconnect and replay
+
+Remote streams carry monotonic sequence numbers. The SDK tracks ordering, deduplicates replayed events, and replays buffered server events when a subscription reconnects.
+
+The important application-level rule is to keep a thread ID when you need to reattach:
+
+```py
+async for chunk in client.runs.stream(
+    "thread-id",
+    "simple-tool-graph",
+    input={"messages": [{"role": "user", "content": "continue"}]},
+    stream_mode="updates",
+):
+    print(chunk.data)
+```
+
+
+
+
+`client.runs.stream(...)` is the current Python SDK streaming API.
+
+
+
+
+## Resume after an interrupt
+
+When a graph pauses for human input, inspect `run.interrupted` and `run.interrupts`, then resume by calling `stream_events(..., version="v3")` again with `Command`.
+
+```py
+from langgraph.types import Command
+
+run = graph.stream_events(input, version="v3", config=thread_config)
+
+for message in run.messages:
+    print(str(message.text))
+
+if run.interrupted:
+    print(run.interrupts)
+
+run = graph.stream_events(
+    Command(resume={"decisions": [{"type": "approve"}]}),
+    version="v3",
+    config=thread_config,
+)
+final_state = run.output
+```
+
+
+## Relationship to Pregel Streaming
+
+Event Streaming and Pregel Streaming serve different levels of the stack. Use [Pregel Streaming](/oss/python/langgraph/streaming) when you need low-level Pregel stream modes or access to LangGraph internals. Use Event Streaming (`stream_events(..., version="v3")`) when application code benefits from typed projections.
+
+---
+
+<div className="source-links">
+<Callout icon="terminal-2">
+    [Connect these docs](/use-these-docs) to Claude, VSCode, and more via MCP for real-time answers.
+</Callout>
+<Callout icon="edit">
+    [Edit this page on GitHub](https://github.com/langchain-ai/docs/edit/main/src/oss/langgraph/streaming/event-streaming.mdx) or [file an issue](https://github.com/langchain-ai/docs/issues/new/choose).
+</Callout>
+</div>
