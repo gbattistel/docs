@@ -1,0 +1,388 @@
+---
+title: Event Streaming
+description: Stream LangGraph runs with typed projections for messages, state, subgraphs, output, and extensions.
+---
+
+Event Streaming is the recommended in-process streaming model for most LangGraph application code. It returns a run stream object that can be consumed in multiple ways at the same time.
+
+
+
+```ts
+const run = await graph.streamEvents(
+  { messages: [{ role: "user", content: "What is 42 * 17?" }] },
+  { version: "v3" }
+);
+
+for await (const message of run.messages) {
+  for await (const token of message.text) {
+    process.stdout.write(token);
+  }
+}
+
+const finalState = await run.output;
+```
+
+
+<Note>
+  The `version="v3"` flag is temporarily required to opt in to this stream behavior. The new behavior will become the default stream version in the next major LangGraph release.
+</Note>
+
+## Choose in-process or remote streaming
+
+LangGraph uses the same streaming event model in process and over the wire. The API surface changes because local code can hold rich objects directly, while remote clients receive serialized protocol events.
+
+Use in-process streaming when your code runs in the same process as the graph:
+
+
+
+```ts
+const run = await graph.streamEvents(
+  { messages: [{ role: "user", content: "What is 42 * 17?" }] },
+  { version: "v3" }
+);
+
+for await (const message of run.messages) {
+  for await (const token of message.text) {
+    process.stdout.write(token);
+  }
+}
+
+const output = await run.output;
+```
+
+
+
+
+In-process streams can expose rich objects such as promises, async iterables, and class instances. Native projections such as `run.messages` and `run.subgraphs` are built with stream transformers over the graph's event flow.
+
+
+Use remote streaming when the graph or agent runs behind a LangGraph API server:
+
+
+
+```ts
+import { Client } from "@langchain/langgraph-sdk";
+
+const client = new Client({ apiUrl: "http://localhost:2024" });
+const thread = client.threads.stream({ assistantId: "my-agent" });
+
+await thread.run.start({
+  input: { messages: [{ role: "user", content: "hello" }] },
+});
+
+for await (const message of thread.messages) {
+  for await (const token of message.text) {
+    process.stdout.write(token);
+  }
+}
+
+await thread.close();
+```
+
+
+
+
+Remote streams use the same logical channels, such as `messages`, `values`, `tools`, `lifecycle`, and `custom:<name>`. The SDK opens subscriptions lazily when a projection is first accessed.
+
+
+In-process and remote streaming share these properties:
+
+- Both surfaces are organized around messages, state values, subgraphs, output, and custom extensions.
+- Both support multiple independent consumers over the same run.
+- Both use namespaces to describe where an event came from in a graph tree.
+- Both can expose custom transformer data when the data is serializable.
+
+| Concern | In process | Remote |
+| ------- | ---------- | ------ |
+| Entry point | `graph.stream_events(..., version="v3")` | `client.threads.stream(...)` or `client.runs.stream(...)` |
+| Transport | Direct async iterables | SSE, WebSocket, or custom adapter |
+| Projection source | Runtime objects | Serialized protocol events |
+| Custom streaming data | Local projections | Named `StreamChannel` events via `custom:<name>` |
+| Reconnect and replay | Not needed | Handled by sequence numbers and SDK buffers |
+
+## What Event Streaming provides
+
+The run stream exposes typed projections over one underlying event flow:
+
+| Projection | Use |
+| ---------- | --- |
+| `run` | Iterate every protocol event. |
+| `run.messages` | Stream chat model messages and token deltas. |
+| `run.values` | Iterate state snapshots and await the final value. |
+| `run.output` | Await the final output. |
+| `run.subgraphs` | Discover and observe nested graph executions. |
+| `run.interrupts` | Inspect human-in-the-loop interrupt payloads. |
+| `run.interrupted` | Check whether the run paused for human input. |
+| `run.extensions` | Consume custom stream transformer projections. |
+
+Multiple consumers can read these projections concurrently. Reading `run.messages` does not consume events needed by `run.values`, `run.subgraphs`, or `run.output`.
+
+## Stream all protocol events
+
+Use the run object itself when you want the raw protocol event stream:
+
+
+
+```ts
+const run = await graph.streamEvents(
+  { messages: [{ role: "user", content: "What is 42 * 17?" }] },
+  { version: "v3" }
+);
+
+for await (const event of run) {
+  const namespace = event.params.namespace;
+  console.log(namespace, event.method, event.params.data);
+}
+```
+
+
+Each event has a channel-like `method`, a `seq` number, and `params` containing `namespace`, `timestamp`, optional `node`, and channel-specific `data`. To subscribe to specific graph, subgraph, or task namespaces, see [Namespaces](/oss/javascript/langgraph/streaming/namespaces).
+
+
+
+## Channels and event lifecycle
+
+Raw events flow on channels. The channel name appears as the event's `method`; each channel emits a specific event shape.
+
+| Channel | Purpose |
+| ------- | ------- |
+| `values` | Full graph state snapshots. |
+| `updates` | Per-node state deltas. |
+| `messages` | Content-block-centric chat model output. |
+| `tools` | Tool call start, streamed output, finish, and error events. |
+| `lifecycle` | Run, subgraph, and subagent status changes. |
+| `checkpoints` | Lightweight checkpoint envelopes for branching and time travel. |
+| `input` | Human-in-the-loop input requests and responses. |
+| `tasks` | Pregel task creation and result events. |
+| `custom` | User-defined payloads from graph code. |
+| `custom:<name>` | Application-defined stream transformer output. |
+
+The typed projections (`run.messages`, `run.values`, etc.) are built from these channels. Filter on channels when [subscribing to raw protocol events](#subscribe-to-raw-protocol-events) from a deployed graph.
+
+### Message lifecycle
+
+The `messages` channel models output as content blocks:
+
+```text
+message-start
+content-block-start
+content-block-delta
+content-block-finish
+message-finish
+```
+
+Content blocks have explicit boundaries: a block starts, emits zero or more deltas, and finishes before the next block in the same message starts. This makes token streaming, reasoning blocks, tool-call blocks, and multimodal content explicit without requiring provider-specific formats. `message-finish` may include token usage; unrecoverable model-call failures arrive as message error events.
+
+### Tool lifecycle
+
+The `tools` channel exposes tool execution:
+
+```text
+tool-started
+tool-output-delta
+tool-finished
+tool-error
+```
+
+Tool events are correlated by tool call ID, so a tool execution can be joined back to its originating tool-call content block on the `messages` channel.
+
+### Run lifecycle
+
+The `lifecycle` channel tracks root run, subgraph, and subagent status. Status values:
+
+- `started`
+- `running`
+- `completed`
+- `failed`
+- `interrupted`
+
+Each lifecycle event carries a `namespace`, optional graph name, optional error, optional checkpoint, and optional `cause` explaining why a child namespace started (parent tool call, fan-out send, edge transition). Consumers should tolerate unknown causes so the protocol can add new variants without breaking existing clients.
+
+## Stream messages
+
+Use `run.messages` for chat model output:
+
+
+
+```ts
+const run = await graph.streamEvents(input, { version: "v3" });
+
+for await (const message of run.messages) {
+  const text = await message.text;
+  const usage = await message.usage;
+
+  console.log(text);
+  console.log(usage);
+}
+```
+
+
+
+
+`message.text` is both an async iterable and a promise-like value. Iterate it for token-by-token output, or await it for the complete text.
+
+
+## Stream subgraphs
+
+Use `run.subgraphs` to observe nested graph work without parsing namespace strings:
+
+
+
+```ts
+const run = await graph.streamEvents(input, { version: "v3" });
+
+for await (const subgraph of run.subgraphs) {
+  console.log(subgraph.name, subgraph.path);
+
+  for await (const message of subgraph.messages) {
+    console.log(await message.text);
+  }
+}
+```
+
+
+For product-specific streams, see [Deep Agents streaming](/oss/javascript/deepagents/event-streaming) for subagent streams and [LangChain agent streaming](/oss/javascript/langchain/streaming) for tool calls and middleware events.
+
+## Stream state
+
+Use `run.values` to stream full state snapshots after each step:
+
+
+
+```ts
+const run = await graph.streamEvents(input, { version: "v3" });
+
+for await (const snapshot of run.values) {
+  console.log(snapshot);
+}
+
+const finalState = await run.output;
+```
+
+
+## Stream multiple projections
+
+
+
+Use concurrent consumers when you need multiple projections in JavaScript:
+
+```ts
+await Promise.all([
+  (async () => {
+    for await (const message of run.messages) {
+      console.log(await message.text);
+    }
+  })(),
+  (async () => {
+    for await (const subgraph of run.subgraphs) {
+      console.log(subgraph.path);
+    }
+  })(),
+]);
+```
+
+
+## Add custom projections
+
+Custom stream transformers can add application-specific projections under `run.extensions`:
+
+
+
+```ts
+const run = await graph.streamEvents(input, {
+  version: "v3",
+  transformers: [statsTransformer, toolActivityTransformer],
+});
+
+for await (const activity of run.extensions.toolActivity) {
+  console.log(activity);
+}
+
+console.log(await run.extensions.totalTokens);
+```
+
+
+See [custom stream transformers](/oss/javascript/langgraph/streaming/custom-transformers) for the transformer contract.
+
+## Stream deployed graphs and agents
+
+Use the LangGraph SDK to stream graphs and agents that run behind a LangGraph API server.
+
+
+
+`client.threads.stream(...)` returns a `ThreadStream`. A thread stream is a remote handle that mirrors the in-process Event Streaming model:
+
+| Getter | Channel | Use |
+| ------ | ------- | --- |
+| `thread.messages` | `messages` | Stream message text, reasoning, usage, and blocks. |
+| `thread.values` | `values` | Stream state snapshots and await the final state. |
+| `thread.output` | `values` | Await final output. |
+| `thread.toolCalls` | `tools` | Observe tool call lifecycle and results. |
+| `thread.subgraphs` | `lifecycle` | Observe nested graph execution. |
+| `thread.subagents` | `lifecycle` and `tools` | Observe Deep Agents subagent work. |
+| `thread.extensions.<name>` | `custom:<name>` | Consume custom transformer projections. |
+
+The SDK opens subscriptions lazily. If a client only reads `thread.output`, it does not subscribe to token-level messages.
+
+
+### Subscribe to raw protocol events
+
+Most applications should use Event Streaming through typed projections. Use raw subscriptions for debugging, advanced routing, or custom rendering:
+
+
+
+```ts
+const events = await thread.subscribe({
+  channels: ["messages", "tools", "values", "lifecycle"],
+  namespaces: [["researcher", "tools"]],
+  depth: 0,
+});
+
+for await (const event of events) {
+  console.log(event.method, event.params.namespace, event.params.data);
+}
+```
+
+
+Use `namespaces` and `depth` to subscribe to specific graph, subgraph, and task events. See [Namespaces](/oss/javascript/langgraph/streaming/namespaces) for matching rules and recipes.
+
+### Reconnect and replay
+
+Remote streams carry monotonic sequence numbers. The SDK tracks ordering, deduplicates replayed events, and replays buffered server events when a subscription reconnects.
+
+The important application-level rule is to keep a thread ID when you need to reattach:
+
+
+
+```ts
+const thread = client.threads.stream("thread-id", {
+  assistantId: "simple-tool-graph",
+});
+```
+
+
+
+
+`client.runs.stream(...)`, `client.runs.joinStream(...)`, and `client.threads.joinStream(...)` continue to work for existing code. Use `client.threads.stream(...)` when you want a remote API that maps directly to the Event Streaming protocol and typed projections.
+
+
+## Resume after an interrupt
+
+When a graph pauses for human input, inspect `run.interrupted` and `run.interrupts`, then resume by calling `stream_events(..., version="v3")` again with `Command`.
+
+
+
+## Relationship to Pregel Streaming
+
+Event Streaming and Pregel Streaming serve different levels of the stack. Use [Pregel Streaming](/oss/javascript/langgraph/streaming) when you need low-level Pregel stream modes or access to LangGraph internals. Use Event Streaming (`stream_events(..., version="v3")`) when application code benefits from typed projections.
+
+---
+
+<div className="source-links">
+<Callout icon="terminal-2">
+    [Connect these docs](/use-these-docs) to Claude, VSCode, and more via MCP for real-time answers.
+</Callout>
+<Callout icon="edit">
+    [Edit this page on GitHub](https://github.com/langchain-ai/docs/edit/main/src/oss/langgraph/streaming/event-streaming.mdx) or [file an issue](https://github.com/langchain-ai/docs/issues/new/choose).
+</Callout>
+</div>
