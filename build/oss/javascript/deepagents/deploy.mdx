@@ -1,0 +1,124 @@
+---
+title: Deploy with Managed Deep Agents
+description: Deploy a deep agent with the Deep Agents CLI and Managed Deep Agents.
+---
+
+`deepagents deploy` creates or updates a Managed Deep Agent. Managed Deep Agents is a LangSmith private preview API for hosting Deep Agents with managed execution, threads, and human-in-the-loop support.
+
+<Note>
+    Managed Deep Agents is in private preview. [Join the waitlist](https://www.langchain.com/langsmith-managed-deep-agents-waitlist) to request access.
+</Note>
+
+For the complete deployment guide, API details, and access requirements, see [Deploy a Managed Deep Agent](/langsmith/deploy-managed-deep-agent).
+
+## Prerequisites
+
+Before you deploy, ensure you have:
+
+- Private preview access to Managed Deep Agents.
+- A LangSmith API key for a workspace with access.
+- The Deep Agents CLI installed.
+- A Deep Agents project with `deepagents.toml` and `AGENTS.md`.
+
+## Install
+
+Install the CLI or run it directly with `uvx`:
+
+<CodeGroup>
+    ```bash uv
+    uv tool install deepagents-cli
+    ```
+
+    ```bash uvx
+    uvx deepagents-cli deploy
+    ```
+</CodeGroup>
+
+## Project layout
+
+Place the agent files next to `deepagents.toml`. The CLI discovers these files and sends them to the Managed Deep Agents API.
+
+```txt
+my-agent/
+├── deepagents.toml
+├── AGENTS.md
+├── tools.json
+├── skills/
+│   └── <skill-name>/
+│       └── SKILL.md
+└── subagents/
+    └── <subagent-name>/
+        ├── deepagents.toml
+        └── AGENTS.md
+```
+
+| File | Description |
+| --- | --- |
+| `deepagents.toml` | Required. Configures the managed agent. |
+| `AGENTS.md` | Required. Provides the agent instructions loaded at session start. |
+| `tools.json` | Optional. Defines tool configuration for the managed agent. |
+| `skills/` | Optional. Contains skill definitions. Each skill directory includes a `SKILL.md` file. |
+| `subagents/` | Optional. Contains subagent definitions. Each subagent directory includes `deepagents.toml` and `AGENTS.md`. |
+
+## Subagents
+
+To deploy subagents with the main agent, add a `subagents/` directory at the project root. Each subagent lives in its own subdirectory and includes its own `deepagents.toml` and `AGENTS.md`.
+
+```txt
+subagents/
+└── <subagent-name>/
+    ├── deepagents.toml
+    └── AGENTS.md
+```
+
+The CLI discovers subagents at deploy time and sends them to the Managed Deep Agents API with the main agent.
+
+## Deploy
+
+Set your LangSmith API key, then run `deepagents deploy` from the project directory:
+
+```bash
+export LANGSMITH_API_KEY="lsv2_..."
+deepagents deploy
+```
+
+By default, the command looks for `deepagents.toml` in the current directory. Pass `--config` to use a different path:
+
+```bash
+deepagents deploy --config path/to/deepagents.toml
+```
+
+The CLI calls the Managed Deep Agents API. CLI-created agents and API-created agents use the same managed agent model.
+
+## Invoke the agent
+
+After deployment, use the Managed Deep Agents API under `/v1/deepagents/threads` to create threads and run the agent.
+
+The private preview API uses the same LangSmith API key as the CLI:
+
+```txt
+X-Api-Key: <LANGSMITH_API_KEY>
+```
+
+For supported endpoint groups, see the [Managed Deep Agents API](/langsmith/managed-deep-agents-api) reference.
+
+## Alternative: LangSmith Deployment
+
+Managed Deep Agents is the streamlined CLI and API path for deploying Deep Agents. You can also deploy Deep Agents with a standard [LangSmith Deployment](/langsmith/deployment-quickstart).
+
+Use a standard LangSmith Deployment when you need custom application code, custom routes, advanced authentication, full Agent Server APIs, stronger isolation controls, or maximum scalability.
+
+## Limitations
+
+Managed Deep Agents is not the same as a standalone LangSmith Deployment. The private preview does not expose the full Agent Server route surface, bundled frontend hosting, custom auth providers, custom routes, A2A, MCP agent exposure, or RemoteGraph endpoints.
+
+---
+
+<div className="source-links">
+<Callout icon="terminal-2">
+    [Connect these docs](/use-these-docs) to Claude, VSCode, and more via MCP for real-time answers.
+</Callout>
+<Callout icon="edit">
+    [Edit this page on GitHub](https://github.com/langchain-ai/docs/edit/main/src/oss/deepagents/deploy.mdx) or [file an issue](https://github.com/langchain-ai/docs/issues/new/choose).
+</Callout>
+</div>
