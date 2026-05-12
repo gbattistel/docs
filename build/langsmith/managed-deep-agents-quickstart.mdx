@@ -1,0 +1,135 @@
+---
+title: Managed Deep Agents quickstart
+sidebarTitle: Quickstart
+description: "Create your first agent and run it through the Managed Deep Agents API."
+---
+
+In this quickstart, you'll authenticate against the Managed Deep Agents API, create an agent from code, and run it on a new thread.
+
+## Before you start
+
+You'll need:
+
+- A LangSmith account ([sign up here](https://smith.langchain.com/agents?skipOnboarding=true&utm_source=docs&utm_medium=cta&utm_campaign=langsmith-signup&utm_content=langsmith-managed-deep-agents-quickstart)).
+- A LangSmith API key.
+- An OpenAI or Anthropic API key, added to your LangSmith workspace as a secret.
+
+If you don't already have a model API key configured in LangSmith, follow Steps 1 and 2 of the [Fleet quickstart](/langsmith/fleet/quickstart) to create one and store it as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` before continuing.
+
+## 1. Get your LangSmith API key
+
+If you don't already have one, follow the [Create an API key](/langsmith/create-account-api-key) guide. Save the key (it starts with `lsv2_`) somewhere safe.
+
+<Warning>Treat your LangSmith API key like a password. It carries the permissions of your account.</Warning>
+
+## 2. Verify your credentials
+
+List the agents in your workspace to confirm authentication is working:
+
+```shell
+curl --request GET \
+  --url {BASE_URL}/v1/deepagents/agents \
+  --header '{HEADER_NAME}: LANGSMITH_API_KEY'
+```
+
+A successful response returns a paginated list:
+
+```json
+{
+  "items": [],
+  "next_cursor": null
+}
+```
+
+If the list is empty, you're ready to create your first agent.
+
+## 3. Create your first agent
+
+Send a `POST` request to `/v1/deepagents/agents` with a name and a basic configuration:
+
+```shell
+curl --request POST \
+  --url {BASE_URL}/v1/deepagents/agents \
+  --header '{HEADER_NAME}: LANGSMITH_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "name": "My first agent",
+    "graph_id": "{GRAPH_ID}"
+  }'
+```
+
+The response includes the new agent's `id`. Save it for the next step.
+
+```json
+{
+  "id": "agt_...",
+  "name": "My first agent",
+  "status": "active"
+}
+```
+
+<Note>
+  `graph_id` selects which underlying graph runs your agent. Available graph IDs depend on your workspace configuration. Confirm with your LangSmith administrator or list available graphs in your deployment.
+</Note>
+
+## 4. Create a thread
+
+A thread holds the state of a conversation across one or more runs:
+
+```shell
+curl --request POST \
+  --url {BASE_URL}/v1/deepagents/threads \
+  --header '{HEADER_NAME}: LANGSMITH_API_KEY'
+```
+
+Save the returned `thread_id`.
+
+## 5. Run your agent
+
+Stream a run on the thread, passing the `agent_id` from Step 3 and an `input` message:
+
+```shell
+curl --request POST \
+  --url {BASE_URL}/v1/deepagents/threads/{THREAD_ID}/runs/stream \
+  --header '{HEADER_NAME}: LANGSMITH_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "agent_id": "{AGENT_ID}",
+    "input": {
+      "messages": [{ "role": "user", "content": "Hello" }]
+    }
+  }'
+```
+
+The response streams events as the agent runs. When the stream completes, your agent has produced its first reply.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="API reference" icon="book" href="/langsmith/managed-deep-agents-api-ref">
+    Browse all endpoints and request schemas.
+  </Card>
+
+  <Card title="Add tools" icon="puzzle" href="/langsmith/fleet/tools">
+    Connect Slack, GitHub, Linear, and more.
+  </Card>
+
+  <Card title="Schedule and trigger runs" icon="bolt" href="/langsmith/fleet/schedules">
+    Run your agent on a schedule or in response to events.
+  </Card>
+
+  <Card title="Skills" icon="bulb" href="/langsmith/fleet/skills">
+    Package reusable knowledge and actions for your agents.
+  </Card>
+</CardGroup>
+
+---
+
+<div className="source-links">
+<Callout icon="terminal-2">
+    [Connect these docs](/use-these-docs) to Claude, VSCode, and more via MCP for real-time answers.
+</Callout>
+<Callout icon="edit">
+    [Edit this page on GitHub](https://github.com/langchain-ai/docs/edit/main/src/langsmith/managed-deep-agents-quickstart.mdx) or [file an issue](https://github.com/langchain-ai/docs/issues/new/choose).
+</Callout>
+</div>
